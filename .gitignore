@@ -1,0 +1,23 @@
+# Data never goes in this public repo
+data/
+*.csv
+*.csv.gz
+*.parquet
+*.zip
+
+# Secrets and local config
+.env
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+secrets/
+.aws/
+
+# Python / tooling
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+.vscode/
+.DS_Store
