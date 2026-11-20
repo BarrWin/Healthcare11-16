@@ -17,6 +17,9 @@ import shutil
 import sys
 import tempfile
 
+# Glue's home directory is not writable, and gdown keeps a cookie file under ~/.cache
+os.environ["HOME"] = tempfile.mkdtemp()
+
 import boto3
 import gdown
 from awsglue.utils import getResolvedOptions
