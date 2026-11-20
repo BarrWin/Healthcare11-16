@@ -12,6 +12,11 @@ Parameters:
     Type: String
     Default: cron(0 16 * * ? *)
     Description: UTC. 16:00 UTC = 11:00 AM EST. Change to cron(0 15 * * ? *) while daylight saving is in effect.
+  ScheduleEnabled:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Keep false until the Drive key is stored; set true to start the daily 11:00 AM run.
   GitHubRepo:
     Type: String
     Default: BarrWin/Healthcare11-16
@@ -85,7 +90,7 @@ Resources:
       Role: !GetAtt GlueRole.Arn
       GlueVersion: "3.0"
       MaxCapacity: 0.0625
-      Timeout: 120
+      Timeout: 30
       Command:
         Name: pythonshell
         PythonVersion: "3.9"
@@ -103,7 +108,7 @@ Resources:
       GlueVersion: "4.0"
       WorkerType: G.1X
       NumberOfWorkers: 3
-      Timeout: 120
+      Timeout: 45
       Command:
         Name: glueetl
         PythonVersion: "3"
@@ -119,7 +124,7 @@ Resources:
       GlueVersion: "4.0"
       WorkerType: G.1X
       NumberOfWorkers: 3
-      Timeout: 120
+      Timeout: 45
       Command:
         Name: glueetl
         PythonVersion: "3"
@@ -138,7 +143,7 @@ Resources:
       Name: !Sub ${ProjectName}-start-daily
       Type: SCHEDULED
       Schedule: !Ref ScheduleCron
-      StartOnCreation: true
+      StartOnCreation: !Ref ScheduleEnabled
       WorkflowName: !Ref Workflow
       Actions:
         - JobName: !Ref IngestJob

@@ -25,6 +25,8 @@ No data or credentials are ever committed (see `.gitignore`).
 5. In GitHub, repo Settings -> Variables, add `AWS_DEPLOY_ROLE_ARN` (stack output `GitHubDeployRoleArn`) and `DRIVE_FOLDER_ID`.
 6. Test: `aws glue start-workflow-run --name healthcare-metrics-daily`.
 
+Turn the schedule on once the Drive key is stored: redeploy with `ScheduleEnabled=true`.
+
 After that, merging to `main` deploys changes automatically and Glue runs daily.
 
 ## Schedule
