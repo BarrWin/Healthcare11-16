@@ -1,5 +1,9 @@
 # Data never goes in this public repo
 data/
+# dashboard inputs: small aggregates derived from public CMS data (no raw PBJ rows)
+!/data/
+/data/*
+!/data/*.csv
 *.csv
 *.csv.gz
 *.parquet
