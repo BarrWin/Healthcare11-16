@@ -18,6 +18,20 @@ out.mkdir(parents=True, exist_ok=True)
 sm = pd.read_parquet(f"s3://{bucket}/mart_state_month/")
 fq = pd.read_parquet(f"s3://{bucket}/mart_facility_quarter/")
 
+TEXT = {"ccn", "state", "month", "provider_name", "city_town", "zip_code", "county_parish",
+        "ownership_type", "provider_type"}
+
+
+def to_float(df):
+    """Spark decimals arrive as Arrow decimal types that pandas cannot divide: use float64."""
+    for c in df.columns:
+        if c not in TEXT:
+            df[c] = pd.to_numeric(df[c].astype("string"), errors="coerce").astype("float64")
+    return df
+
+
+sm, fq = to_float(sm), to_float(fq)
+
 
 def ratio(df, num, den):
     return df[num].sum() / df[den].sum() if df[den].sum() else np.nan
