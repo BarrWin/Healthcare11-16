@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Healthcare metrics pipeline - S3 raw/silver/gold, Glue jobs and workflow, daily schedule.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: healthcare-metrics
+  DriveFolderId:
+    Type: String
+    Description: Google Drive folder ID (folder shared as Anyone with the link)
+  ScheduleCron:
+    Type: String
+    Default: cron(0 16 * * ? *)
+    Description: UTC. 16:00 UTC = 11:00 AM EST. Change to cron(0 15 * * ? *) while daylight saving is in effect.
+  ScheduleEnabled:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Keep false until the Drive key is stored; set true to start the daily 11:00 AM run.
+  GitHubRepo:
+    Type: String
+    Default: BarrWin/Healthcare11-16
+
+
+Resources:
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-raw-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+  SilverBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-silver-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+  GoldBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-gold-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-glue
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: glue.amazonaws.com}, Action: "sts:AssumeRole"}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: pipeline-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+                Resource:
+                  - !GetAtt RawBucket.Arn
+                  - !Sub ${RawBucket.Arn}/*
+                  - !GetAtt SilverBucket.Arn
+                  - !Sub ${SilverBucket.Arn}/*
+                  - !GetAtt GoldBucket.Arn
+                  - !Sub ${GoldBucket.Arn}/*
+
+  IngestJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub ${ProjectName}-ingest-drive
+      Role: !GetAtt GlueRole.Arn
+      GlueVersion: "3.0"
+      MaxCapacity: 0.0625
+      Timeout: 30
+      Command:
+        Name: pythonshell
+        PythonVersion: "3.9"
+        ScriptLocation: !Sub s3://${RawBucket}/_scripts/ingest_drive.py
+      DefaultArguments:
+        --additional-python-modules: gdown==5.2.0
+        --RAW_BUCKET: !Ref RawBucket
+        --DRIVE_FOLDER_ID: !Ref DriveFolderId
+  RawToSilverJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub ${ProjectName}-raw-to-silver
+      Role: !GetAtt GlueRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 3
+      Timeout: 45
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub s3://${RawBucket}/_scripts/raw_to_silver.py
+      DefaultArguments:
+        --RAW_BUCKET: !Ref RawBucket
+        --SILVER_BUCKET: !Ref SilverBucket
+  SilverToGoldJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub ${ProjectName}-silver-to-gold
+      Role: !GetAtt GlueRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 3
+      Timeout: 45
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub s3://${RawBucket}/_scripts/silver_to_gold.py
+      DefaultArguments:
+        --SILVER_BUCKET: !Ref SilverBucket
+        --GOLD_BUCKET: !Ref GoldBucket
+
+  Workflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Name: !Sub ${ProjectName}-daily
+  StartTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub ${ProjectName}-start-daily
+      Type: SCHEDULED
+      Schedule: !Ref ScheduleCron
+      StartOnCreation: !Ref ScheduleEnabled
+      WorkflowName: !Ref Workflow
+      Actions:
+        - JobName: !Ref IngestJob
+  SilverTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub ${ProjectName}-after-ingest
+      Type: CONDITIONAL
+      StartOnCreation: true
+      WorkflowName: !Ref Workflow
+      Predicate:
+        Conditions:
+          - {LogicalOperator: EQUALS, JobName: !Ref IngestJob, State: SUCCEEDED}
+      Actions:
+        - JobName: !Ref RawToSilverJob
+  GoldTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub ${ProjectName}-after-silver
+      Type: CONDITIONAL
+      StartOnCreation: true
+      WorkflowName: !Ref Workflow
+      Predicate:
+        Conditions:
+          - {LogicalOperator: EQUALS, JobName: !Ref RawToSilverJob, State: SUCCEEDED}
+      Actions:
+        - JobName: !Ref SilverToGoldJob
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-github-deploy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:ref:refs/heads/main
+      Policies:
+        - PolicyName: deploy-this-stack-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${ProjectName}-*-${AWS::AccountId}
+                  - !Sub arn:aws:s3:::${ProjectName}-*-${AWS::AccountId}/*
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
+              - Effect: Allow
+                Action: glue:*
+                Resource: "*"
+              - Effect: Allow
+                Action: [iam:GetRole, iam:CreateRole, iam:UpdateRole, iam:PutRolePolicy, iam:AttachRolePolicy,
+                         iam:DetachRolePolicy, iam:DeleteRolePolicy, iam:GetRolePolicy, iam:PassRole, iam:TagRole]
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-*
+              - Effect: Allow
+                Action: cloudformation:GetTemplateSummary
+                Resource: "*"
+
+Outputs:
+  RawBucketName: {Value: !Ref RawBucket}
+  SilverBucketName: {Value: !Ref SilverBucket}
+  GoldBucketName: {Value: !Ref GoldBucket}
+  GitHubDeployRoleArn: {Value: !GetAtt GitHubDeployRole.Arn}
