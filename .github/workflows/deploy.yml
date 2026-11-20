@@ -1,0 +1,34 @@
+name: Deploy pipeline to AWS
+on:
+  push:
+    branches: [main]
+    paths: [glue/**, infra/**, .github/workflows/deploy.yml]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # lets GitHub request a short-lived AWS token (no stored keys)
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  STACK: healthcare-metrics
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}   # repo variable, not a secret
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Update stack (buckets, jobs, workflow, schedule)
+        run: |
+          aws cloudformation deploy --stack-name "$STACK" --template-file infra/template.yaml \
+            --capabilities CAPABILITY_NAMED_IAM --no-fail-on-empty-changeset \
+            --parameter-overrides DriveFolderId="${{ vars.DRIVE_FOLDER_ID }}"
+      - name: Upload Glue scripts
+        run: |
+          RAW=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+            --query "Stacks[0].Outputs[?OutputKey=='RawBucketName'].OutputValue" --output text)
+          aws s3 sync glue "s3://$RAW/_scripts/" --exclude "*" --include "*.py"
