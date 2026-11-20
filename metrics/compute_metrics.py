@@ -64,7 +64,8 @@ m4 = (ok.groupby("hprd_quartile", observed=True)
            hprd=("hours_per_resident_day", "median"),
            rehospitalization_pct=("rehospitalization_pct", "mean"))
       .reset_index())
-corr4 = ok.hours_per_resident_day.corr(ok.rehospitalization_pct, method="spearman")
+# Spearman = Pearson on ranks (avoids a scipy dependency)
+corr4 = ok.hours_per_resident_day.rank().corr(ok.rehospitalization_pct.rank())
 
 # 5. HPRD and contract share by CMS star staffing rating and by ownership type
 m5_rating = (fq.dropna(subset=["staffing_rating"]).groupby("staffing_rating")
