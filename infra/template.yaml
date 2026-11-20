@@ -20,11 +20,10 @@ Parameters:
   GitHubRepo:
     Type: String
     Default: BarrWin/Healthcare11-16
-  GitHubRepoAlt:
+  GitHubSubPattern:
     Type: String
-    Default: BarrWin/healthcare11-16
-    Description: Same repo with different capitalization. AWS compares the repo name case-sensitively.
-
+    Default: repo:BarrWin@*/Healthcare11-16@*:ref:refs/heads/main
+    Description: GitHub now sends the owner and repo numeric IDs in the token subject (owner@id/repo@id). The wildcards stand for those IDs.
 
 Resources:
   RawBucket:
@@ -194,7 +193,7 @@ Resources:
               StringLike:
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubRepo}:ref:refs/heads/main
-                  - !Sub repo:${GitHubRepoAlt}:ref:refs/heads/main
+                  - !Ref GitHubSubPattern
       Policies:
         - PolicyName: deploy-this-stack-only
           PolicyDocument:

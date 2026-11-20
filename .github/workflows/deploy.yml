@@ -18,16 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Show OIDC claims (temporary debug)
-        run: |
-          RESP=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
-          echo "$RESP" | python3 -c "
-          import sys, json, base64
-          t = json.load(sys.stdin)['value'].split('.')[1]
-          t += '=' * (-len(t) % 4)
-          d = json.loads(base64.urlsafe_b64decode(t))
-          print({k: d[k] for k in ['sub', 'aud', 'iss', 'repository', 'ref', 'job_workflow_ref'] if k in d})
-          "
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}   # repo variable, not a secret
