@@ -16,7 +16,7 @@ Parameters:
     Type: String
     AllowedValues: ["true", "false"]
     Default: "false"
-    Description: Keep false until the Drive key is stored; set true to start the daily 11:00 AM run.
+    Description: Only used when the trigger is first created. After that, start or stop the daily run with aws glue start-trigger / stop-trigger (name healthcare-metrics-start-daily).
   GitHubRepo:
     Type: String
     Default: BarrWin/Healthcare11-16
