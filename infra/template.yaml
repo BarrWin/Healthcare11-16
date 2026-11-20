@@ -27,26 +27,38 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${ProjectName}-raw-${AWS::AccountId}
-      PublicAccessBlockConfiguration: &block
+      PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      BucketEncryption: &enc
+      BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
   SilverBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${ProjectName}-silver-${AWS::AccountId}
-      PublicAccessBlockConfiguration: *block
-      BucketEncryption: *enc
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
   GoldBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${ProjectName}-gold-${AWS::AccountId}
-      PublicAccessBlockConfiguration: *block
-      BucketEncryption: *enc
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
 
   DriveSecret:
     Type: AWS::SecretsManager::Secret
