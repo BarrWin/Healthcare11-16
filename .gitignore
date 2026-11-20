@@ -5,6 +5,11 @@ data/
 *.parquet
 *.zip
 
+# dashboard inputs: small aggregates derived from public CMS data (no raw PBJ rows)
+!/data/
+/data/*
+!/data/*.csv
+
 # Secrets and local config
 .env
 *.pem
