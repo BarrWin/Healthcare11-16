@@ -19,6 +19,7 @@ spark = GlueContext(SparkContext()).spark_session
 
 
 def put(df, name):
+    # Write one Gold table as parquet, replacing the previous version.
     df.write.mode("overwrite").parquet(f"{GOLD}/{name}/")
 
 
@@ -31,6 +32,7 @@ s3 = boto3.client("s3")
 
 
 def state(bucket, key):
+    # Read a small text file from S3, or None if it does not exist yet.
     try:
         return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
     except s3.exceptions.NoSuchKey:
@@ -38,16 +40,18 @@ def state(bucket, key):
 
 
 def run():
-    st = spark.read.parquet(f"{SILVER}/staffing_daily/")
+    st = spark.read.parquet(f"{SILVER}/staffing_daily/")   # daily staffing, already cleaned
     prov = spark.read.parquet(f"{SILVER}/cms/nh_providerinfo/")
 
     # ---- dimensions ----
+    # dim_facility: one row per facility (name, location, ownership, beds, CMS ratings).
     dim_facility = pick(prov, [
         "provider_name", "city_town", "state", "zip_code", "county_parish", "ownership_type",
         "provider_type", "number_of_certified_beds", "overall_rating", "staffing_rating",
         "reported_total_nurse_staffing_hours_per_resident_per_day",
         "total_nursing_staff_turnover", "registered_nurse_turnover",
         "number_of_substantiated_complaints", "latitude", "longitude"])
+    # dim_date: one row per calendar day with year, month, quarter and weekend flag.
     dim_date = (st.select("work_date").distinct()
                 .withColumn("year", F.year("work_date")).withColumn("month", F.month("work_date"))
                 .withColumn("quarter", F.quarter("work_date"))
@@ -57,31 +61,39 @@ def run():
     put(dim_date, "dim_date")
 
     # ---- fact ----
+    # fact_staffing_daily: one row per facility per day; the measure columns are hours and census.
     fact = st.select("ccn", "work_date", "month", F.col("STATE").alias("state"),
                      F.col("MDScensus").alias("census"), "total_hours", "employed_hours",
                      "contract_hours", "hours_per_resident_day", "census_zero", "no_hours_reported")
     fact.write.mode("overwrite").partitionBy("month").parquet(f"{GOLD}/fact_staffing_daily/")
 
+    # Valid rows: census above zero AND hours reported. Dividing hours by a zero census is meaningless.
     valid = fact.filter(~F.col("census_zero") & ~F.col("no_hours_reported"))
 
     # ---- metric marts ----
+    # Totals are summed first and divided afterwards (weighted ratio), never averaged per day.
     agg = [F.sum("total_hours").alias("total_hours"),
            F.sum("census").alias("resident_days"),
            F.sum("contract_hours").alias("contract_hours")]
+    # mart_state_month: feeds the state charts and monthly trend.
     mart_state_month = (valid.groupBy("state", "month").agg(*agg)
         .withColumn("hours_per_resident_day", F.col("total_hours") / F.col("resident_days"))
         .withColumn("contract_share", F.col("contract_hours") / F.col("total_hours")))
     put(mart_state_month, "mart_state_month")
 
     # rehospitalization: measure 521 = short-stay residents rehospitalized after admission
+    # Quality measures from CMS claims data; keep only measure 521 and read the score as a number.
     claims = spark.read.parquet(f"{SILVER}/cms/nh_qualitymsr_claims/")
     rehosp = (claims.filter(F.col("measure_code") == "521")
               .select("ccn", F.col("adjusted_score").cast("double").alias("rehospitalization_pct")))
 
+    # Facility-quarter totals. avg_census and days_valid are used for occupancy and bed-days.
     fq = (valid.groupBy("ccn").agg(*agg, F.avg("census").alias("avg_census"),
                                    F.countDistinct("work_date").alias("days_valid"))
           .withColumn("hours_per_resident_day", F.col("total_hours") / F.col("resident_days"))
           .withColumn("contract_share", F.col("contract_hours") / F.col("total_hours")))
+    # mart_facility_quarter: one row per facility with metrics + facility details + rehospitalization (left joins keep every facility).
+    # occupancy = average daily census / certified beds.
     mart_facility_quarter = (fq.join(dim_facility, "ccn", "left")
         .withColumn("occupancy", F.col("avg_census") / F.col("number_of_certified_beds").cast("double"))
         .join(rehosp, "ccn", "left"))
@@ -89,6 +101,8 @@ def run():
     print("gold written")
 
 
+# Skip logic: Silver records a signature of its inputs. If Gold already built from the same signature, nothing to do.
+# Gold writes its copy of the signature only after a successful build.
 silver_sig = state(args["SILVER_BUCKET"], "_state/raw_signature.txt")
 if not FORCE and silver_sig and state(args["GOLD_BUCKET"], "_state/silver_signature.txt") == silver_sig:
     print("Silver unchanged since the last successful Gold build; nothing to do.")

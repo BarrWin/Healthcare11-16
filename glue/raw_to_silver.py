@@ -16,15 +16,20 @@ from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import functions as F
 
+# Job parameters. FORCE=true rebuilds Silver even if the Raw files have not changed.
 args = getResolvedOptions(sys.argv, ["RAW_BUCKET", "SILVER_BUCKET"] + (["FORCE"] if "--FORCE" in sys.argv else []))
 FORCE = args.get("FORCE", "false").lower() == "true"
 RAW, SILVER = f"s3://{args['RAW_BUCKET']}", f"s3://{args['SILVER_BUCKET']}"
 sc = SparkContext()
 spark = GlueContext(sc).spark_session
+# "dynamic": a rerun replaces only the month partitions it writes, so months are never duplicated.
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 s3 = boto3.client("s3")
+# Data-quality report for this run. Saved to _dq/<date>.json at the end (or on a hard failure).
 dq = {"run_at": datetime.now(timezone.utc).isoformat(), "failed": [], "warnings": [], "counts": {}}
 
+# PBJ staffing categories (RN director, RN admin, RN, LPN admin, LPN, CNA, nurse aide trainee, med aide).
+# Each has an employee column (_emp), a contract column (_ctr) and a total column.
 CATS = ["RNDON", "RNadmin", "RN", "LPNadmin", "LPN", "CNA", "NAtrn", "MedAide"]
 EMP = [f"Hrs_{c}_emp" for c in CATS]
 CTR = [f"Hrs_{c}_ctr" for c in CATS]
@@ -32,16 +37,19 @@ TOT = [f"Hrs_{c}" for c in CATS]
 
 
 def snake(name):
+    # "Provider Name" -> "provider_name": one consistent column style across all CMS tables.
     name = re.sub(r"[^0-9a-zA-Z]+", "_", name.strip()).strip("_").lower()
     return name
 
 
 def read_csv(path):
+    # multiLine + escape handle quoted fields with line breaks; ISO-8859-1 is the CMS files' encoding.
     return (spark.read.option("header", True).option("multiLine", True)
             .option("escape", '"').option("encoding", "ISO-8859-1").csv(path))
 
 
 def fail(msg):
+    # Hard failure: record it in the DQ report, then stop the job so bad data never reaches Silver.
     dq["failed"].append(msg)
     _write_dq()
     raise RuntimeError(msg)
@@ -70,20 +78,23 @@ def read_state(key):
 
 # ---------------- (inside run()) staffing ----------------
 def run():
+    # --- Part 1: daily staffing file (PBJ_*) ---
     raw = read_csv(f"{RAW}/pbj/")
+    # Everything is read as text first; cast the census and all hours columns to numbers.
     num_cols = ["MDScensus"] + [c for c in raw.columns if c.startswith("Hrs_")]
     df = raw
     for c in num_cols:
         df = df.withColumn(c, F.col(c).cast("double"))
+    # PROVNUM stays text (leading zeros matter); WorkDate like 20240401 becomes a real date, plus a yyyy-MM month for partitioning.
     df = (df.withColumn("PROVNUM", F.col("PROVNUM").cast("string"))
             .withColumn("work_date", F.to_date(F.col("WorkDate").cast("string"), "yyyyMMdd"))
             .withColumn("month", F.date_format("work_date", "yyyy-MM")))
     for c in ["PROVNAME", "CITY", "STATE", "COUNTY_NAME"]:      # trim stray whitespace/tabs
         df = df.withColumn(c, F.regexp_replace(F.trim(F.col(c)), r"\s+", " "))
-    df.cache()
+    df.cache()   # reused by many checks below; avoid re-reading the CSV each time
     dq["counts"]["staffing_rows"] = df.count()
 
-    # hard checks
+    # hard checks: the job stops if any of these fail
     if df.filter(F.length("PROVNUM") != 6).count():
         fail("PROVNUM is not 6 characters in some rows (was it read as a number?)")
     if df.filter(F.col("work_date").isNull()).count():
@@ -96,7 +107,8 @@ def run():
     if df.filter(neg).count():
         fail("negative values found")
 
-    # soft checks -> flags
+    # soft checks -> flags: rows are kept and issues are reported as warnings
+    # Total hours = sum of the eight categories; employed + contract should add up to the same total.
     emp_sum = sum(F.col(c) for c in EMP)
     ctr_sum = sum(F.col(c) for c in CTR)
     tot = sum(F.col(c) for c in TOT)
@@ -106,15 +118,18 @@ def run():
     mismatch = df.filter(F.abs(F.col("employed_hours") + F.col("contract_hours") - F.col("total_hours")) > 0.05).count()
     if mismatch:
         dq["warnings"].append(f"{mismatch} rows where employed + contract != total (tolerance 0.05)")
+    # Flags used later by Gold: HPRD is only defined when census > 0. Zero census or zero hours rows are excluded from metrics.
     df = (df.withColumn("census_zero", F.col("MDScensus") == 0)
             .withColumn("no_hours_reported", F.col("total_hours") == 0)
             .withColumn("hours_per_resident_day",
                         F.when(F.col("MDScensus") > 0, F.col("total_hours") / F.col("MDScensus"))))
+    # More than 24 nursing hours per resident per day is physically implausible -> treated as an error.
     df = df.withColumn("over_24_hprd", F.col("hours_per_resident_day") > 24)
     dq["counts"].update(census_zero=df.filter("census_zero").count(),
                         no_hours=df.filter("no_hours_reported").count(),
                         over_24_hprd=df.filter("over_24_hprd").count())
 
+    # Completeness: every facility should have a row for every day in the file.
     days = df.select("work_date").distinct().count()
     short = df.groupBy("PROVNUM").agg(F.countDistinct("work_date").alias("d")).filter(F.col("d") < days).count()
     if short:
@@ -128,17 +143,20 @@ def run():
           .write.mode("overwrite").partitionBy("month").parquet(f"{SILVER}/staffing_daily/"))
 
     # ---------------- CMS reference tables ----------------
+    # --- Part 2: every CSV under cms/ becomes its own Silver table ---
     rows = s3.list_objects_v2(Bucket=args["RAW_BUCKET"], Prefix="cms/").get("Contents", [])
     provider_ccns = None
     for obj in rows:
         name = obj["Key"].split("/")[-1]
         if not name.lower().endswith(".csv"):
             continue
+        # Table name = file name minus the date suffix, in snake_case (NH_ProviderInfo + date -> nh_providerinfo)
         table = snake(re.sub(r"_(Oct)?\d{4,8}\.csv$|\.csv$", "", name, flags=re.I))
         t = read_csv(f"{RAW}/{obj['Key']}")
         t = t.toDF(*[snake(c) for c in t.columns])
         for c in t.columns:                      # trim all text columns
             t = t.withColumn(c, F.trim(F.col(c)))
+        # The CMS certification number is the join key to the staffing data; pad to 6 characters (leading zeros).
         ccn_col = next((c for c in t.columns if c.startswith("cms_certification_number")), None)
         if ccn_col:
             t = t.withColumn("ccn", F.lpad(F.col(ccn_col), 6, "0")).drop(ccn_col)
@@ -147,6 +165,7 @@ def run():
         if table == "nh_providerinfo":
             provider_ccns = t.select("ccn").distinct()
 
+    # Join check: nearly every facility in the staffing data should exist in Provider Info.
     if provider_ccns is not None:
         pbj_ccns = clean.select(F.col("PROVNUM").alias("ccn")).distinct()
         total = pbj_ccns.count()
@@ -161,6 +180,8 @@ def run():
     print(json.dumps(dq, indent=2))
 
 
+# Skip logic: if no Raw file changed since the last successful run, do nothing.
+# The signature file is written only after run() succeeds, so a failed run is retried next time.
 SIG = raw_signature()
 if not FORCE and read_state("_state/raw_signature.txt") == SIG:
     print("Raw files unchanged since the last successful run; nothing to do.")

@@ -24,6 +24,7 @@ import boto3
 import gdown
 from awsglue.utils import getResolvedOptions
 
+# Job parameters passed by the CloudFormation template. FORCE_REFRESH is optional.
 REQUIRED = ["RAW_BUCKET", "DRIVE_FOLDER_ID"]
 args = getResolvedOptions(sys.argv, REQUIRED + (["FORCE_REFRESH"] if "--FORCE_REFRESH" in sys.argv else []))
 FORCE = args.get("FORCE_REFRESH", "false").lower() == "true"
@@ -32,13 +33,15 @@ BUCKET, MANIFEST_KEY = args["RAW_BUCKET"], "_manifest/manifest.json"
 
 
 def load_manifest():
+    # The manifest is the job's memory: which Drive files were already copied to S3.
     try:
         return json.loads(s3.get_object(Bucket=BUCKET, Key=MANIFEST_KEY)["Body"].read())
     except s3.exceptions.NoSuchKey:
-        return {}
+        return {}   # first run: nothing loaded yet
 
 
 def md5_of(path):
+    # Read in 8 MB chunks so a large CSV never has to fit in memory.
     h = hashlib.md5()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(8 * 1024 * 1024), b""):
@@ -53,6 +56,7 @@ def main():
     listing = gdown.download_folder(url=url, skip_download=True, quiet=True, remaining_ok=True)
     if not listing:
         raise RuntimeError("No files listed. Is the Drive folder shared as 'Anyone with the link'?")
+    # Only CSV files are part of the pipeline; anything else in the folder is ignored.
     csvs = [f for f in listing if f.path.lower().endswith(".csv")]
     print(f"{len(csvs)} csv files in Drive folder")
 
@@ -60,24 +64,28 @@ def main():
     work = tempfile.mkdtemp()
     for f in csvs:
         name = os.path.basename(f.path)
+        # Already copied on an earlier run -> skip (unless FORCE_REFRESH was requested).
         if f.id in manifest and not FORCE:
             skipped += 1
             continue
         local = os.path.join(work, name)
+        # Download to local temp disk first, then verify before uploading.
         out = gdown.download(id=f.id, output=local, quiet=True)
         if not out or not os.path.exists(local) or os.path.getsize(local) == 0:
             raise RuntimeError(f"download failed for {name} (Google may be throttling; retry later)")
+        # Record size and md5 so a bad copy can be detected later.
         digest, size = md5_of(local), os.path.getsize(local)
+        # Route by file name: staffing files (PBJ_*) and CMS reference tables get separate prefixes.
         prefix = "pbj" if name.upper().startswith("PBJ_") else "cms"
         key = f"{prefix}/{name}"
         s3.upload_file(local, BUCKET, key)
-        os.unlink(local)
+        os.unlink(local)   # free the temp disk right away
         manifest[f.id] = {"name": name, "key": key, "bytes": size, "md5": digest}
         loaded += 1
         print(f"loaded {name} -> s3://{BUCKET}/{key}")
         # save after every file so a failure never repeats finished files
         s3.put_object(Bucket=BUCKET, Key=MANIFEST_KEY, Body=json.dumps(manifest).encode())
-    shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(work, ignore_errors=True)   # clean up the temp folder
     print(f"done: {loaded} loaded, {skipped} already loaded")
 
 
