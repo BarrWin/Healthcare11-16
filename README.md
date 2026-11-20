@@ -1,6 +1,6 @@
 # Healthcare11-16
 
-CMS nursing-home staffing pipeline on AWS (S3, Glue, Secrets Manager), as approved in the architecture diagram.
+CMS nursing-home staffing pipeline on AWS (S3 and Glue), as approved in the architecture diagram.
 Shared Google Drive folder -> Glue ingest -> S3 Raw -> Glue -> S3 Silver -> Glue -> S3 Gold -> Streamlit (hosted outside AWS).
 
 | Path | What it is |
