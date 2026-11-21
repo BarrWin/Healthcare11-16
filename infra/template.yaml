@@ -26,6 +26,10 @@ Parameters:
     Description: GitHub now sends the owner and repo numeric IDs in the token subject (owner@id/repo@id). The wildcards stand for those IDs.
 
 Resources:
+  # ---- Storage: one bucket per medallion layer. All private and encrypted. ----
+  # Raw    = files exactly as copied from Google Drive (csv)
+  # Silver = cleaned, typed, quality-checked data (parquet)
+  # Gold   = star schema and metric tables the dashboard is built from (parquet)
   RawBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -63,6 +67,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
 
+  # ---- Permissions: the role the Glue jobs run as. It can only touch this project's three buckets. ----
   GlueRole:
     Type: AWS::IAM::Role
     Properties:
@@ -88,6 +93,8 @@ Resources:
                   - !GetAtt GoldBucket.Arn
                   - !Sub ${GoldBucket.Arn}/*
 
+  # ---- Glue jobs. Scripts live in the Raw bucket under _scripts/ (uploaded by the GitHub deploy workflow). ----
+  # 1) Ingest: tiny Python-shell job (1/16 DPU) that copies new Drive files to Raw.
   IngestJob:
     Type: AWS::Glue::Job
     Properties:
@@ -104,6 +111,7 @@ Resources:
         --additional-python-modules: gdown==5.2.0
         --RAW_BUCKET: !Ref RawBucket
         --DRIVE_FOLDER_ID: !Ref DriveFolderId
+  # 2) Raw -> Silver: Spark job (3 small workers) that cleans data and runs the quality checks.
   RawToSilverJob:
     Type: AWS::Glue::Job
     Properties:
@@ -120,6 +128,7 @@ Resources:
       DefaultArguments:
         --RAW_BUCKET: !Ref RawBucket
         --SILVER_BUCKET: !Ref SilverBucket
+  # 3) Silver -> Gold: Spark job that builds the dimensions, fact table and metric marts.
   SilverToGoldJob:
     Type: AWS::Glue::Job
     Properties:
@@ -137,6 +146,9 @@ Resources:
         --SILVER_BUCKET: !Ref SilverBucket
         --GOLD_BUCKET: !Ref GoldBucket
 
+  # ---- Orchestration: a Glue workflow chains the three jobs. ----
+  # The schedule starts ingest; each later trigger fires only when the previous job SUCCEEDED,
+  # so a failure stops the chain and nothing downstream runs on bad data.
   Workflow:
     Type: AWS::Glue::Workflow
     Properties:
@@ -176,6 +188,9 @@ Resources:
       Actions:
         - JobName: !Ref SilverToGoldJob
 
+  # ---- CI/CD: lets GitHub Actions deploy this stack without any stored AWS keys. ----
+  # GitHub proves its identity with a short-lived OIDC token; only the main branch of this repo is trusted,
+  # and the permissions below are limited to this stack, its buckets, Glue and the project's roles.
   GitHubDeployRole:
     Type: AWS::IAM::Role
     Properties:
